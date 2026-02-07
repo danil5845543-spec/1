@@ -133,6 +133,15 @@ def build_user_prompt(data: MenuRequest) -> str:
 def health():
     return {"ok": True}
 
+
+@app.post("/test-generate")
+def test_generate(payload: dict):
+    return {
+        "status": "ok",
+        "received_payload": payload,
+        "message": "Test endpoint works. AI was NOT called."
+    }
+
 @app.post("/generate-menu", response_model=MenuResponse)
 def generate_menu(payload: MenuRequest):
     try:
