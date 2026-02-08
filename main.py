@@ -149,18 +149,17 @@ def generate_menu(payload: MenuRequest):
         user_prompt = build_user_prompt(payload)
 
         # Responses API: просим JSON. Документация рекомендует миграцию на Responses API. :contentReference[oaicite:1]{index=1}
-        resp = client.responses.create(
-            model=OPENAI_MODEL,
-            input=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            # Жестче контролируем формат
-            response_format={"type": "json_object"},
-        )
+        resp = client.chat.completions.create(
+    model=OPENAI_MODEL,
+    messages=[
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ],
+    temperature=0.4
+)
 
-        # У Responses API текст лежит в output_text (в SDK)
-        raw = resp.output_text
+raw = resp.choices[0].message.content
+
         data = json.loads(raw)
 
         # Базовая валидация ожидаемых полей
