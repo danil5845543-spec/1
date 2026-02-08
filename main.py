@@ -8,21 +8,18 @@ from pydantic import BaseModel, Field, conint, confloat
 
 from openai import OpenAI
 
-# ---------
+# ----------------
 # Settings
-# ---------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("Missing OPENAI_API_KEY env var")
-
-# Можно задать модель через env, чтобы легко менять без деплоя
+# ----------------
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # добавь в Render Env Vars
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+# Создаем клиента только если ключ задан (чтобы сервис не падал при старте)
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 app = FastAPI(title="Menu Generator API", version="1.0")
 
-# CORS: на MVP можно разрешить все, потом сузить до домена лендинга
+# CORS: на MVP можно разрешить все, позже ограничишь доменом лендинга
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # лучше: ["https://your-landing.netlify.app"]
@@ -40,6 +37,7 @@ AgeGroup = Literal["0_3", "4_7", "8_12", "13_plus"]
 Allergy = Literal["nuts", "dairy", "eggs", "gluten", "fish_seafood", "other"]
 Avoid = Literal["pork", "beef", "chicken", "fish_seafood", "spicy", "other"]
 
+
 class Dietary(BaseModel):
     allergies: List[Allergy] = Field(default_factory=list)
     avoid: List[Avoid] = Field(default_factory=list)
@@ -48,10 +46,11 @@ class Dietary(BaseModel):
         description="Свободный текст: предпочтения кухни/запреты по вкусу/культурные пожелания"
     )
 
+
 class MenuRequest(BaseModel):
     city: str = Field(min_length=2, max_length=60)
     goal: Goal
-    budget_week_eur: confloat(gt=0, lt=2000)  # на MVP
+    budget_week_eur: confloat(gt=0, lt=2000)
     adults: conint(ge=1, le=6)
     children: conint(ge=0, le=6) = 0
     children_age_groups: List[AgeGroup] = Field(default_factory=list)
@@ -61,8 +60,9 @@ class MenuRequest(BaseModel):
     time_profile: TimeProfile
     favorite_dishes_text: str = Field(default="", max_length=400)
 
+
 # ----------------
-# Output schema (JSON)
+# Output schema
 # ----------------
 class MenuResponse(BaseModel):
     currency: str = "EUR"
@@ -71,21 +71,22 @@ class MenuResponse(BaseModel):
     shopping_list: list
     notes: list
 
-# ---------------
+
+# ----------------
 # Prompt helpers
-# ---------------
+# ----------------
 def build_system_prompt() -> str:
-    # Коротко и жестко задаём формат ответа (JSON only)
     return (
         "Ты — помощник по планированию меню на неделю с учетом бюджета. "
         "Верни результат СТРОГО в JSON (без markdown, без пояснений). "
-        "Меню должно быть реалистичным для домашней готовки и учитывать город/страну по городу. "
-        "Если пользователь просит кухню (например русскую в Испании) — адаптируй блюда под доступные продукты местных магазинов, "
-        "но сохраняй стиль кухни."
+        "Меню должно быть реалистичным для домашней готовки. "
+        "Определи страну/контекст по городу пользователя и адаптируй продукты под местную доступность. "
+        "Если пользователь просит кухню (например, русскую в Испании) — сохрани стиль кухни, "
+        "но используй продукты, которые реально купить в местных супермаркетах."
     )
 
+
 def build_user_prompt(data: MenuRequest) -> str:
-    # Простая, но информативная формулировка
     return f"""
 Данные пользователя:
 - Город: {data.city}
@@ -101,8 +102,8 @@ def build_user_prompt(data: MenuRequest) -> str:
 Задача:
 Составь меню на 7 дней (завтрак/обед/ужин) и список покупок.
 Старайся уложиться в бюджет.
-Учитывай, что продукты должны быть доступными в типичных супермаркетах региона (по городу).
 Избегай аллергенов и исключений.
+Меню должно быть выполнимым по времени готовки под выбранный формат.
 
 Формат ответа (строго JSON):
 {{
@@ -120,11 +121,15 @@ def build_user_prompt(data: MenuRequest) -> str:
     }}
   ],
   "shopping_list": [
-    {{"category": "produce|meat|dairy|dry|frozen|other", "items": [{{"name":"...", "qty":"..."}}]}}
+    {{
+      "category": "produce|meat|dairy|dry|frozen|other",
+      "items": [{{"name":"...", "qty":"..."}}]
+    }}
   ],
   "notes": ["..."]
 }}
 """.strip()
+
 
 # ----------------
 # API endpoints
@@ -132,6 +137,11 @@ def build_user_prompt(data: MenuRequest) -> str:
 @app.get("/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/ping")
+def ping():
+    return {"status": "ok", "message": "API is alive 🚀"}
 
 
 @app.post("/test-generate")
@@ -142,36 +152,53 @@ def test_generate(payload: dict):
         "message": "Test endpoint works. AI was NOT called."
     }
 
+
 @app.post("/generate-menu", response_model=MenuResponse)
 def generate_menu(payload: MenuRequest):
+    if client is None:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY is not configured (set it in Render Environment Variables)."
+        )
+
     try:
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(payload)
 
-        # Responses API: просим JSON. Документация рекомендует миграцию на Responses API. :contentReference[oaicite:1]{index=1}
         resp = client.chat.completions.create(
-    model=OPENAI_MODEL,
-    messages=[
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ],
-    temperature=0.4
-)
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+        )
 
-raw = resp.choices[0].message.content
+        raw = resp.choices[0].message.content
 
-        data = json.loads(raw)
+        # Иногда модель может добавить пробелы/текст — попробуем аккуратно вытащить JSON
+        raw_stripped = raw.strip()
+        # быстрый хак: если вдруг пришло с текстом, вырезаем от первой '{' до последней '}'
+        if not raw_stripped.startswith("{"):
+            start = raw_stripped.find("{")
+            end = raw_stripped.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                raw_stripped = raw_stripped[start:end + 1]
+
+        data = json.loads(raw_stripped)
 
         # Базовая валидация ожидаемых полей
         for k in ("estimated_total_eur", "menu", "shopping_list", "notes"):
             if k not in data:
                 raise ValueError(f"Missing key in model JSON: {k}")
 
-        # Приводим currency по умолчанию
         data.setdefault("currency", "EUR")
         return data
 
     except json.JSONDecodeError:
-        raise HTTPException(status_code=502, detail="AI returned non-JSON response")
+        raise HTTPException(
+            status_code=502,
+            detail="AI returned non-JSON response. Try again or tighten the prompt."
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
